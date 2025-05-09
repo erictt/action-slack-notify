@@ -4,7 +4,7 @@ author: 'rtCamp'
 outputs:
   thread_ts:
     description: 'The timestamp (ts) of the message sent to Slack. This can be used as SLACK_THREAD_TS for sending replies in a thread.'
-    value: ${{ steps.slack_step.outputs.thread_ts }}
+    value: ${{ steps.slack_step.outputs.thread_ts || steps.slack_step_unformatted.outputs.thread_ts }}
 runs:
     using: 'composite'
     steps:
@@ -50,7 +50,7 @@ runs:
 
       - name: "Slack Notification (Unformatted)"
         if: env.SLACKIFY_MARKDOWN != 'true'
-        id: slack_step
+        id: slack_step_unformatted
         uses: "docker://ghcr.io/rtcamp/action-slack-notify:v2.3.3"
         env:
           GITHUB_RUN: "${{ github.event.repository.html_url }}/actions/runs/${{ github.run_id }}"
