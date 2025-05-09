@@ -48,6 +48,23 @@ type Webhook struct {
 	ThreadTs    string       `json:"thread_ts,omitempty"`
 }
 
+type SlackResponse struct {
+	Ok      bool           `json:"ok"`
+	Ts      string         `json:"ts"`
+	Error   string         `json:"error,omitempty"`
+	Channel string         `json:"channel,omitempty"`
+	Message MessageContent `json:"message"`
+}
+
+type MessageContent struct {
+	Text    string `json:"text"`
+	User    string `json:"user"`
+	BotID   string `json:"bot_id"`
+	Type    string `json:"type"`
+	SubType string `json:"subtype"`
+	Ts      string `json:"ts"`
+}
+
 type Attachment struct {
 	Fallback   string  `json:"fallback"`
 	Pretext    string  `json:"pretext,omitempty"`
@@ -314,15 +331,53 @@ func send_raw(endpoint string, payload []byte) error {
 	if err != nil {
 		return err
 	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return fmt.Errorf("Error reading response body: %s", err)
+	}
 
 	if res.StatusCode >= 299 {
-		return fmt.Errorf("Error on message: %s\n", res.Status)
+		// Try to parse error from Slack response body
+		var slackErr SlackResponse
+		json.Unmarshal(body, &slackErr)
+		if slackErr.Error != "" {
+			return fmt.Errorf("Error on message: %s. Slack error: %s", res.Status, slackErr.Error)
+		}
+		return fmt.Errorf("Error on message: %s. Body: %s", res.Status, string(body))
+	}
+
+	// Parse the response to get the ts (thread_ts for the new message)
+	var slackResp SlackResponse
+	if err := json.Unmarshal(body, &slackResp); err != nil {
+		// Log the error but don't fail the action if we can't parse the ts,
+		// as the message was likely sent successfully.
+		fmt.Fprintf(os.Stderr, "Warning: could not parse Slack response to get ts: %s. Body: %s\n", err, string(body))
+	} else {
+		if slackResp.Ok && slackResp.Ts != "" {
+			fmt.Printf("::set-output name=thread_ts::%s\n", slackResp.Ts)
+		} else if !slackResp.Ok && slackResp.Error != "" {
+			// This case might be redundant if status code check already caught it, but good for safety.
+			fmt.Fprintf(os.Stderr, "Warning: Slack API reported an error: %s. Body: %s\n", slackResp.Error, string(body))
+		}
 	}
 
 	if os.Getenv(EnvSlackUpload) != "" {
-		err = sendFile(os.Getenv(EnvSlackUpload), "", os.Getenv(EnvSlackChannel), os.Getenv(EnvThreadTs))
+		// If a file is uploaded, the thread_ts from the initial message (slackResp.Ts)
+		// should be used if SLACK_THREAD_TS was not already provided for the file upload.
+		// The current sendFile function already takes thread_ts as an argument.
+		// If EnvThreadTs is empty, we should pass the newly obtained slackResp.Ts.
+		fileThreadTs := getEnv(EnvThreadTs)
+		if fileThreadTs == "" && slackResp.Ok && slackResp.Ts != "" {
+			fileThreadTs = slackResp.Ts
+		}
+		err = sendFile(os.Getenv(EnvSlackUpload), "", os.Getenv(EnvSlackChannel), fileThreadTs)
 		if err != nil {
-			return err
+			// Log this error but don't necessarily fail the whole action if the primary message was sent.
+			fmt.Fprintf(os.Stderr, "Error sending file after message: %s\n", err)
+			// Depending on desired behavior, you might return err here.
+			// For now, let's assume the primary message success is most important.
 		}
 	}
 
